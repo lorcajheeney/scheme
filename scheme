@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+# The 'scheme' program - 25/06/2022
+import panflute as pf
+import sys
+import io
+import pypandoc
+import os
+import csv
+import re
+import argparse
+import hashlib
+
+CATEGORIES_DIR = "/home/lorca/category"
+MAIN_OPTS = ["-s","-V","geometry:margin=1in","-V","numbersections","-V","fontsize=12pt"]
+DEFN_OPTS = ["-V","documentclass:standalone","-V","classoption:varwidth=true","-V","fontsize=12pt","-V","classoption:border=0.1in"]
+
+def generate_pdf(src):
+    root = os.path.splitext(src)[0]
+    pypandoc.convert_file(src,format="md",to="pdf",extra_args=MAIN_OPTS,outputfile=root+".pdf")
+
+def raw_and_json(elem):
+    raw = pf.stringify(elem)
+    with io.StringIO() as temp:
+        pf.dump(pf.Doc(elem),temp)
+        return (raw,temp.getvalue())
+
+class Concept:
+    def __init__(self,elem): 
+        with io.StringIO() as temp:
+            self.prompt, self.promptjson = raw_and_json(pf.Para(*elem.term.list))
+            self.contentjson = raw_and_json(pf.DefinitionList(elem))[1]
+            elem.term = []
+            self.defn = raw_and_json(pf.DefinitionList(elem))[0]
+            self.hash = (self.__hasher(self.prompt),self.__hasher(self.defn))
+
+    def __hasher(self,s):
+        return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+    def getstatus(self,existing):
+        self.status = "new"
+        for prev in existing:
+            if self.hash[0] == prev[1]:
+                if self.hash[1] == prev[2]:
+                    self.status="old"
+                else: self.status = "update_defn"
+                break
+            if self.hash[1] == prev[2]: 
+                self.status = "update_prompt"
+                break
+        return self.status
+    
+    def encode(self):
+        return list(self.hash)
+category = []
+
+def parser(block,doc):
+    if type(block) == pf.DefinitionList:
+        for elem in block.content:
+            category.append(Concept(elem))
+
+def import_md(src):
+    with open(os.getcwd() + "/" + src,"r") as file:
+        raw = file.read()
+    subject = re.search("\ncategory: (.*)\n",raw).group(1)
+    folder = CATEGORIES_DIR + "/" + subject
+    os.makedirs(folder,exist_ok = True)
+    tree = pf.Doc(*pf.convert_text(raw))
+    tree.walk(parser)
+
+    if os.path.isfile(folder + "/data.csv"):
+        with open(folder+"/data.csv","r") as datafile:
+            existing = list(csv.reader(datafile))
+    else: existing = []
+
+    new = []
+    for i,item in enumerate(category):
+        item.getstatus(existing)
+        if item.status in ["new","update_prompt"]:
+            pypandoc.convert_text(item.promptjson,format="json",to="pdf",outputfile=folder + "/" +  str(i) + ".pdf",extra_args=DEFN_OPTS)
+        if item.status in ["new","update_defn"]:
+            pypandoc.convert_text(item.contentjson,format="json",to="pdf",outputfile=folder + "/" + str(i) + "ans.pdf",extra_args=DEFN_OPTS)
+        new.append([str(i)] + item.encode())
+
+    with open(folder + "/data.csv","w") as datafile:
+        csv.writer(datafile).writerows(new)
+        
+if __name__ == '__main__':
+    args = argparse.ArgumentParser()
+    args.add_argument("source",help="the markdown file to be converted")
+    args.add_argument("--save",help="update the category with the concepts in the file",action="store_true")
+    args.add_argument("--info",help="provide information on concepts parsed",action="store_true")
+    args.add_argument("--nopdf",help="do not generate the pdf for the document",action="store_true")
+    args = args.parse_args()
+    if not args.nopdf: generate_pdf(args.source)
+    if args.save:
+        import_md(args.source)
+        if args.info:
+            print(len(category),"concepts parsed.")
+            for i,item in enumerate(category):
+                print(i,"---",item.status,"---",item.prompt[:30])
+
